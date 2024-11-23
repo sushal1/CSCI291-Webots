@@ -1,0 +1,212 @@
+// --- Webots Mobile Robot Application: Maze Solving ---
+
+// LIBRARIES TO INCLUDE
+#include <webots/robot.h>
+#include <webots/motor.h>
+#include <webots/gps.h>
+#include <webots/distance_sensor.h>
+#include <webots/light_sensor.h>
+#include <math.h>
+#include <stdio.h>
+
+// DEFINED CONSTANTS
+#define TIME_STEP 64
+#define MAX_SPEED 6.28 
+
+// FUNCTION PROTOTYPES
+void initialize_robot(); // function used to initialize the e-puck and its sensors
+void initial_position(const double *position, double *initial_x, double *initial_y, double *initial_z, int *initialized); // function used to record the initial position of the e-puck
+double average_light(); // function used to calculate the average light sensor reading from all the sensors
+void brightest_light(const double *position, double light_average); // function used to update the brightest light value and its position
+void maze_navigation(double *left_speed, double *right_speed); // function used to navigate through the maze with the LHR (left hand rule)
+bool check_position(const double *position, double initial_x, double initial_z); // function used to check if the e-puck has reached the initial position
+bool max_light(const double *position); // function used to check if the e-puck has reached the brightest light source
+void activate_leds(); // function used to activate the LEDs on the e-puck to show that it has reached the brightest light source
+
+// GLOBAL CONTROL VARIABLES
+
+typedef enum { SEARCHING, NAVIGATING_TO_LIGHT, STOPPED } RobotState; // using an enum to define the robot's states
+
+double min_light_value = 4000; // value that will check if the minimum light is found
+double min_light_x = 0, min_light_y = 0, min_light_z = 0; // position of the recorded minimum light
+
+RobotState state = SEARCHING; // initializing the robot's state
+
+// device tags for the motors, sensors & the led on the epuck
+WbDeviceTag gps, left_motor, right_motor; 
+WbDeviceTag light_sensors[8];
+WbDeviceTag proximity_sensors[8];
+WbDeviceTag led[8];
+
+// FUNCTION DEFINITIONS
+
+// function to initialize the e-puck & all devices
+void initialize_robot() {
+  wb_robot_init(); // initializing the e-puck
+
+  // initializing the GPS sensor from the turret slot on the e-puck
+  gps = wb_robot_get_device("gps");
+  wb_gps_enable(gps, TIME_STEP);
+
+  char sensor_name[16]; // variable for device name
+
+  // initializing all the light sensors on the e-puck
+  for (int i = 0; i < 8; i++) { // goes in a loop till the max no. of sensors
+    sprintf(sensor_name, "ls%d", i);
+    light_sensors[i] = wb_robot_get_device(sensor_name); 
+    wb_light_sensor_enable(light_sensors[i], TIME_STEP);
+  }
+
+  // initializing all the proximity sensors on the e-puck
+  for (int i = 0; i < 8; i++) { // goes in a loop till the max no. of sensors
+    sprintf(sensor_name, "ps%d", i);
+    proximity_sensors[i] = wb_robot_get_device(sensor_name);
+    wb_distance_sensor_enable(proximity_sensors[i], TIME_STEP);
+  }
+
+  // initializing all the LEDs on the e-puck
+  for (int i = 0; i < 8; i++) { // goes in a loop till the max no. of sensors
+    sprintf(sensor_name, "led%d", i);
+    led[i] = wb_robot_get_device(sensor_name);
+  }
+
+  // initializing the left & right motors on the e-puck
+  left_motor = wb_robot_get_device("left wheel motor");
+  right_motor = wb_robot_get_device("right wheel motor");
+  wb_motor_set_position(left_motor, INFINITY); // setting their initial position
+  wb_motor_set_position(right_motor, INFINITY);
+  wb_motor_set_velocity(left_motor, 0.0); // setting their initial velocity
+  wb_motor_set_velocity(right_motor, 0.0);
+}
+
+// function to record the e-puck's initial position
+void initial_position(const double *position, double *initial_x, double *initial_y, double *initial_z, int *initialized) {
+  // uses pointers to refer to variables from anywhere
+  if (*initialized == 0) { // if the initial position has not been recorded
+    // setting the initial position as the current position
+    *initial_x = position[0];
+    *initial_y = position[1];
+    *initial_z = position[2];
+    *initialized = 1; // incrementing to show that the position has already been stored
+    printf("Initial position recorded: x = %.2f, y = %.2f, z = %.2f\n", *initial_x, *initial_y, *initial_z);
+  }
+}
+
+// function to calculate the average light intensity from all the light sensors
+double average_light() {
+  double light_average = 0; // variable to calculate average
+  for (int i = 0; i < 8; i++) { // going in a loop to get sensor value from all sensors
+    light_average += wb_light_sensor_get_value(light_sensors[i]); // adding the sensor value to the variable
+  }
+  return light_average / 8; // returning the average light
+}
+
+// function to update the brightest light's position if a lesser intensity detected
+void brightest_light(const double *position, double light_average) {
+  // uses pointers to refer to update the position directly
+  if (light_average < min_light_value) { // if the average light value is lesser than the minimum light value
+    min_light_value = light_average; // setting the minimum light as that light
+    min_light_x = position[0]; // setting position as that position
+    min_light_y = position[1];
+    min_light_z = position[2];
+    printf("Min. light value: %.2lf at (%.2lf, %.2lf, %.2lf)\n", min_light_value, min_light_x, min_light_y, min_light_z);
+  }
+}
+
+// function that will navigate the maze
+void maze_navigation(double *left_speed, double *right_speed) {
+  // variables for wall detection
+  bool front_wall = wb_distance_sensor_get_value(proximity_sensors[7]) > 100; 
+  bool left_wall = wb_distance_sensor_get_value(proximity_sensors[5]) > 100;
+  bool left_corner = wb_distance_sensor_get_value(proximity_sensors[6]) > 100;
+
+  if (front_wall) { // if wall straight ahead is detected
+    *left_speed = MAX_SPEED; // set left speed as maximum
+    *right_speed = -MAX_SPEED; // set right speed as minimum
+  } else if (left_wall) { // if left wall detected
+    *left_speed = MAX_SPEED; // set left and right speeds as max
+    *right_speed = MAX_SPEED;
+  } else if (left_corner) { // if left corner detected
+    *left_speed = MAX_SPEED; // set left speed as maximum
+    *right_speed = MAX_SPEED / 5; // set right speed/5
+  } else { // if any other case
+    *left_speed = MAX_SPEED / 5; // left speed slowed down
+    *right_speed = MAX_SPEED; // right speed max
+  }
+  // setting motor speeds
+  wb_motor_set_velocity(left_motor, *left_speed); 
+  wb_motor_set_velocity(right_motor, *right_speed);
+}
+
+// function that will check if e-puck returned to initial position
+bool check_position(const double *position, double initial_x, double initial_z) {
+  // returns true if current position is very close to initial position, else false
+  return fabs(position[0] - initial_x) < 0.01 && fabs(position[2] - initial_z) < 0.01;
+}
+
+// function that will check if the function has arrived at the brightest light source
+bool max_light(const double *position) {
+  double dx = min_light_x - position[0]; // difference in current x and x of the light
+  double dy = min_light_y - position[1]; // difference in current y and y of the light
+  double dz = min_light_z - position[2]; // difference in current z and z of the light
+  double distance = sqrt((dx * dx) + (dy * dy) + (dz * dz)); // distance formula calculation
+  return distance < 0.01; // returns true if close to light, else false
+}
+
+// function that will activate the LEDs on the e-puck after stopping at the brightest light
+void activate_leds() {
+  for (int i = 0; i < 8; i++) { // goes in a loop
+    wb_led_set(led[i], 1); // turns on all the LEDs
+  }
+}
+
+// MAIN FUNCTION
+int main(int argc, char **argv) {
+  initialize_robot(); // initializing the e-puck
+
+  double initial_x = 0, initial_y = 0, initial_z = 0; // initializing variables for storing initial position of epuck
+  int initialized = 0, steps_moved = 0; // varirables for checking if initial position has been stored & to count the no. of steps moved
+
+  // initializing variables for speed
+  double left_speed = MAX_SPEED; 
+  double right_speed = MAX_SPEED; 
+
+  while (wb_robot_step(TIME_STEP) != -1) {
+    const double *position = wb_gps_get_values(gps); // getting current position from gps
+
+    initial_position(position, &initial_x, &initial_y, &initial_z, &initialized); // function to get initial position
+
+    if (state == SEARCHING) { // if the robot is in the searching state
+      double light_average = average_light(); // calculating the average light value
+      brightest_light(position, light_average); // checking if the lesser intensity value has been stored
+
+      steps_moved++; // incrementing the number of steps moved
+
+      if (steps_moved > 500 && check_position(position, initial_x, initial_z)) { // if the e-puck has moved more than 500 steps & it is close to initial position
+        printf("Robot has returned to the initial position. Preparing to navigate to the brightest light.\n");
+        left_speed = right_speed = 0; // stopping the e-puck
+        wb_motor_set_velocity(left_motor, left_speed);
+        wb_motor_set_velocity(right_motor, right_speed);
+        state = NAVIGATING_TO_LIGHT; // changing the state to navigating
+        continue;
+      }
+
+      maze_navigation(&left_speed, &right_speed); // function to traverse in the maze with LHR
+
+    } else if (state == NAVIGATING_TO_LIGHT) { // if the e-puck is in the navigating phase
+      maze_navigation(&left_speed, &right_speed); // going through the maze with LHR
+
+      if (max_light(position)) { // if the e-puck has arrived at the position of the min. light intensity
+        printf("Reached the brightest light source. Stopping.\n");
+        wb_motor_set_velocity(left_motor, 0); // stopping the e-puck
+        wb_motor_set_velocity(right_motor, 0);
+        activate_leds(); // activating all the leds
+        state = STOPPED; // changing its state
+        break; // breaking out of the loop
+      }
+    }
+  }
+
+  wb_robot_cleanup();
+  return 0;
+}
